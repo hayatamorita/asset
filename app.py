@@ -17,7 +17,7 @@ SOURCE_FILES = {
 }
 TMP_FILE = "tmp.txt"
 
-# ===== ボタン強調スタイル（任意） =====
+# =====（任意）ボタンスタイル =====
 st.markdown("""
 <style>
 div.stButton > button {
@@ -33,70 +33,70 @@ div[data-testid="column"]:last-child div.stButton > button {
 # ===== ユーティリティ =====
 def load_lines(path: str):
     with open(path, "r", encoding="utf-8") as f:
-        lines = [ln.strip() for ln in f.readlines()]
-    return [ln for ln in lines if ln]
+        lines = [ln.rstrip("\n") for ln in f]
+    # 空行除去
+    return [ln.strip() for ln in lines if ln.strip()]
 
-def load_tmp_set() -> set:
-    if not os.path.exists(TMP_FILE):
-        return set()
-    with open(TMP_FILE, "r", encoding="utf-8") as f:
-        return set(ln.strip() for ln in f if ln.strip())
-
-def append_tmp(text: str):
-    if not text:
-        return
-    # 既に書かれていれば追記しない
-    ex = load_tmp_set()
-    if text in ex:
-        return
-    with open(TMP_FILE, "a", encoding="utf-8") as f:
-        f.write(text + "\n")
+def tmp_exists() -> bool:
+    return os.path.exists(TMP_FILE)
 
 def clear_tmp():
     with open(TMP_FILE, "w", encoding="utf-8") as f:
         f.write("")
 
-def build_text_to_indices(lines):
-    d = {}
-    for i, t in enumerate(lines):
-        d.setdefault(t, []).append(i)
-    return d
+def append_tmp(index: int, text: str):
+    """tmp.txt に 'index<TAB>text' 形式で追記（重複防止）"""
+    if index < 0 or not text:
+        return
+    seen = load_tmp_indices()
+    if index in seen:
+        return
+    with open(TMP_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{index}\t{text}\n")
+
+def load_tmp_indices() -> set:
+    """tmp.txt から既読 index を読み出し（'idx\\ttext' 形式）"""
+    if not tmp_exists():
+        return set()
+    s = set()
+    with open(TMP_FILE, "r", encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            # フォーマット移行対策: 旧形式（textのみ）があれば無視
+            parts = ln.split("\t", 1)
+            try:
+                idx = int(parts[0])
+                s.add(idx)
+            except Exception:
+                # 旧形式は index 不明なので既読にしない（全札読了を優先）
+                pass
+    return s
 
 def ensure_state():
     ss = st.session_state
-    ss.setdefault("source_label", list(SOURCE_FILES.keys())[0])  # 選択中ラベル
+    # --- セッション初回（ブラウザ再読込やRerunでリセットされる） ---
+    if "initialized" not in ss:
+        ss.initialized = True
+        # ◆要件: rerun（初期化）時は tmp.txt を空に
+        clear_tmp()
+
+    ss.setdefault("source_label", list(SOURCE_FILES.keys())[0])
     ss.setdefault("source_path", SOURCE_FILES[ss["source_label"]])
     ss.setdefault("lines", [])
-    ss.setdefault("order", [])             # 再生順（indexのシャッフル）
-    ss.setdefault("pos", 0)                # 現在位置（0-based）
-    ss.setdefault("started", False)        # 1枚目は押されるまで再生しない
-    ss.setdefault("audio_bytes", None)     # 最新音声バイナリ
-    ss.setdefault("audio_token", 0)        # プレイヤー差し替えトークン
-    ss.setdefault("last_play_ts", 0.0)     # 最後に再生した時刻
-    ss.setdefault("await_next", False)     # 次ボタン待ち（リピート対象）
-    ss.setdefault("lang", "ja")            # gTTS言語
-    ss.setdefault("slow", False)           # gTTS slow
-    ss.setdefault("repeat_sec", 1.0)       # 自動リピートまでの秒数（要件: 1秒）
-    ss.setdefault("read_set", set())       # 既読 index（tmpも反映）
-    ss.setdefault("read_history", [])      # 既読テキスト表示用
-
-def apply_tmp_as_read():
-    """tmp.txt の内容を既読に反映して、読み順の頭出しを調整"""
-    ss = st.session_state
-    ss.read_set = set()
-    ss.read_history = []
-    tmp_seen = load_tmp_set()
-    t2i = build_text_to_indices(ss.lines)
-    for txt in tmp_seen:
-        for idx in t2i.get(txt, []):
-            ss.read_set.add(idx)
-            ss.read_history.append(txt)
-    # pos を未読の先頭へ進める
-    n = len(ss.order)
-    i = ss.pos
-    while i < n and ss.order[i] in ss.read_set:
-        i += 1
-    ss.pos = i
+    ss.setdefault("order", [])            # シャッフル順（indexの列）
+    ss.setdefault("pos", 0)               # 0-based
+    ss.setdefault("started", False)       # 1枚目は押されるまで再生しない
+    ss.setdefault("audio_bytes", None)
+    ss.setdefault("audio_token", 0)
+    ss.setdefault("last_play_ts", 0.0)
+    ss.setdefault("await_next", False)
+    ss.setdefault("lang", "ja")
+    ss.setdefault("slow", False)
+    ss.setdefault("repeat_sec", 1.0)      # 要件: 1秒
+    ss.setdefault("read_set", set())      # 既読 index（tmp反映後）
+    ss.setdefault("read_history", [])     # 表示用（text）
 
 def shuffle_order():
     ss = st.session_state
@@ -104,7 +104,20 @@ def shuffle_order():
     random.shuffle(ss.order)
     ss.pos = 0
     ss.started = False
-    apply_tmp_as_read()
+    apply_tmp_as_read()  # tmp反映 → 未読先頭へ
+
+def apply_tmp_as_read():
+    """tmp の既読 index を反映し、pos を未読先頭に合わせる"""
+    ss = st.session_state
+    ss.read_set = load_tmp_indices()
+    # 表示用履歴も更新（index順ではなく、追記順に近くならないので簡易再構築）
+    ss.read_history = [ss.lines[i] for i in ss.read_set if 0 <= i < len(ss.lines)]
+    # 未読先頭へ
+    n = len(ss.order)
+    i = ss.pos
+    while i < n and ss.order[i] in ss.read_set:
+        i += 1
+    ss.pos = i
 
 def current_index() -> int:
     ss = st.session_state
@@ -128,10 +141,10 @@ def mark_read(idx: int, text: str):
     if idx >= 0 and idx not in ss.read_set:
         ss.read_set.add(idx)
         ss.read_history.append(text)
-        append_tmp(text)  # 永続化
+        append_tmp(idx, text)  # ◆indexで永続化（同文面でも別札扱い）
 
 def synth_say(text: str):
-    """gTTS合成→バッファ格納→再生トークン更新→既読登録"""
+    """合成→プレイヤー更新→既読登録"""
     tts = gTTS(text=text, lang=st.session_state.lang, slow=st.session_state.slow)
     buf = io.BytesIO()
     tts.write_to_fp(buf)
@@ -144,7 +157,7 @@ def synth_say(text: str):
     mark_read(idx, text)
 
 def go_next() -> bool:
-    """次の未読へ。未読が無ければ False"""
+    """次の未読へ。無ければ False"""
     ss = st.session_state
     if not ss.lines:
         return False
@@ -187,16 +200,19 @@ def render_audio(mp3_bytes: bytes, token: int):
     </script>
     """, height=80)
 
-# ===== 起動時初期化 =====
+# ===== 初期化 =====
 ensure_state()
 
 # ===== サイドバー：読み上げセット選択（丸ボタン） =====
 st.sidebar.header("読み上げセット")
-new_label = st.sidebar.radio("使用するテキストを選択", list(SOURCE_FILES.keys()), index=list(SOURCE_FILES.keys()).index(st.session_state.source_label))
+labels = list(SOURCE_FILES.keys())
+new_label = st.sidebar.radio("使用するテキストを選択", labels, index=labels.index(st.session_state.source_label))
+
+# セット切替時：◆tmp をリセット → 読込 → シャッフル → tmp反映（空）
 if new_label != st.session_state.source_label:
-    # セット切替：ソース更新 → 再読込 → シャッフル → tmp反映
     st.session_state.source_label = new_label
     st.session_state.source_path = SOURCE_FILES[new_label]
+    clear_tmp()  # ◆要件：切替時に tmp リセット
     try:
         st.session_state.lines = load_lines(st.session_state.source_path)
         shuffle_order()
@@ -204,7 +220,7 @@ if new_label != st.session_state.source_label:
     except Exception as e:
         st.error(f"読み込みに失敗しました: {e}")
 
-# 起動時自動読込（まだ未読込のとき）
+# 起動時自動読み込み（未読み込み時）
 if not st.session_state.lines:
     path = st.session_state.source_path
     if os.path.exists(path):
@@ -230,26 +246,25 @@ with col_reset:
 
 # ===== ボタン処理 =====
 if reset_clicked:
-    clear_tmp()              # 既読の永続化をクリア
-    shuffle_order()          # 並びをシャッフルし直し & tmp反映（空）
+    clear_tmp()     # ◆要件：手動リセットで tmp クリア
+    shuffle_order() # 並び再シャッフル & tmp反映（空）
     st.success("初期化しました（並びシャッフル・既読クリア）。")
 
 if next_clicked:
-    # ボタン押下時点で「現在の札」を表示し直すため、
-    # 先に状態を更新→この後の表示ブロックで current_text() を再取得
     if not st.session_state.started:
-        st.session_state.started = True   # 1回目：現在の札を読み上げ
-        synth_say(current_text())
+        st.session_state.started = True
+        synth_say(current_text())              # 現在表示中の未読を読み上げ & 既読化
     else:
         has_next = go_next()
         if has_next:
-            synth_say(current_text())
+            synth_say(current_text())          # 進めた未読を読み上げ
         else:
+            # ここに来るのは「全札読了時」。案内だけ出して音声は止める。
             st.session_state.audio_bytes = None
             st.session_state.await_next = False
-            st.info("未読はありません。「最初から」でリセットしてください。")
+            st.info("すべて読み終えました。「最初から」でリセットしてください。")
 
-# ====== 自動リピート（1秒） ======
+# ===== 自動リピート（1秒） =====
 now = time.time()
 if st.session_state.started and st.session_state.await_next and st.session_state.audio_bytes:
     elapsed = now - st.session_state.last_play_ts
@@ -260,17 +275,15 @@ if st.session_state.started and st.session_state.await_next and st.session_state
         ms = int((st.session_state.repeat_sec - elapsed) * 1000) + 100
         js_autorefresh(max(ms, 350))
 
-# ===== 表示（ボタン処理後に出す：押下で必ず表示が更新される） =====
+# ===== 表示（ボタン処理後に再取得して必ず更新） =====
 cur_text = current_text()
-st.subheader("現在の札")
-st.write(f"**{cur_text if cur_text else '（未読の札はありません）'}**")
 
 # 進捗（既読枚数 / 合計）
 read_count = len(st.session_state.read_set)
 total = len(st.session_state.lines)
 st.caption(f"進捗: {read_count} / {total}")
 
-# 音声の描画（HTML5 audio）
+# 音声の描画
 if st.session_state.audio_bytes:
     render_audio(st.session_state.audio_bytes, st.session_state.audio_token)
 
